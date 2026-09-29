@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Snake</title>
+<style>
+* { box-sizing: border-box; }
+html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #000; color: #fff; font-family: Arial, Helvetica, sans-serif; }
+body { display: grid; place-items: center; }
+#game { position: relative; width: min(calc(100vw - 4px), calc(100dvh - 4px), 480px); aspect-ratio: 1; border: 2px solid #555; container-type: inline-size; }
+canvas { display: block; width: 100%; height: 100%; }
+.scores { position: absolute; top: 10.4%; width: 100%; text-align: center; pointer-events: none; }
+#score { display: block; font-size: 14cqw; font-weight: 400; line-height: 1.2; }
+.high { margin-top: 1.8cqw; font-size: 4.5cqw; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+[hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main id="game" aria-label="Snake game, 12 by 12 grid">
+  <canvas id="board" width="720" height="720" aria-label="Green snake and red apple on a black playing field"></canvas>
+  <div class="scores"><output id="score" aria-label="Score">0</output><div class="high">High score: <span id="best">0</span></div></div>
+  <span id="status" class="sr-only" role="status">Press an arrow key or WASD to start.</span>
+</main>
+<script>
+'use strict';
+const SIZE = 12, GREEN = '#30f51c', RED = '#ff0000';
+const canvas = document.getElementById('board'), ctx = canvas.getContext('2d');
+const scoreEl = document.getElementById('score'), bestEl = document.getElementById('best');
+const statusEl = document.getElementById('status');
+const directions = {ArrowUp:{x:0,y:-1},ArrowDown:{x:0,y:1},ArrowLeft:{x:-1,y:0},ArrowRight:{x:1,y:0},w:{x:0,y:-1},s:{x:0,y:1},a:{x:-1,y:0},d:{x:1,y:0}};
+let snake, apple, direction, target, queue = [], score = 0, best = 0;
+let state = 'ready', progress = 0, deathTime = 0, lastTime = null;
+function readStored(key, fallback) { try { const value = localStorage.getItem(key); return value === null ? fallback : Number(value); } catch (_) { return fallback; } }
+function save(key,value) { try { localStorage.setItem(key,String(value)); } catch (_) {} }
+best = readStored('snake-high-score',0); if (!Number.isFinite(best) || best < 0) best = 0;
+const speed = 6;
+function updateScore() {
+  scoreEl.textContent = score;
+  if (score > best) { best = score; save('snake-high-score',best); }
+  bestEl.textContent = best;
+}
+function reset() {
+  snake = [{x:4,y:5},{x:3,y:5},{x:2,y:5}]; apple = {x:6,y:5};
+  direction = {x:1,y:0}; target = null; queue = []; score = 0; progress = 0; deathTime = 0; state = 'ready';
+  updateScore(); statusEl.textContent = 'Press an arrow key or WASD to start.'; draw();
+}
+function same(a,b) { return a.x === b.x && a.y === b.y; }
+function opposite(a,b) { return a.x === -b.x && a.y === -b.y; }
+function randomApple() {
+  const empty = [];
+  for (let y=0;y<SIZE;y++) for (let x=0;x<SIZE;x++) if (!snake.some(p => p.x===x && p.y===y)) empty.push({x,y});
+  if (!empty.length) { apple = null; state = 'won'; statusEl.textContent = 'You filled the board! Press any key to reset.'; return; }
+  apple = empty[Math.floor(Math.random()*empty.length)];
+}
+function crash() { state = 'dying'; deathTime = 0; progress = 0; target = null; queue = []; statusEl.textContent = 'Game over. Press any key to reset, then an arrow key or WASD to start.'; }
+function planStep() {
+  if (queue.length) direction = queue.shift();
+  target = {x:snake[0].x+direction.x,y:snake[0].y+direction.y};
+  const eating = apple && same(target,apple);
+  const occupied = eating ? snake : snake.slice(0,-1);
+  if (target.x<0 || target.x>=SIZE || target.y<0 || target.y>=SIZE || occupied.some(p=>same(p,target))) crash();
+}
+function finishStep() {
+  const eating = apple && same(target,apple);
+  snake.unshift(target);
+  if (eating) { score++; updateScore(); randomApple(); } else snake.pop();
+  progress = 0;
+  if (state === 'running') planStep();
+}
+function steer(next) {
+  if (state === 'ready') {
+    // A reverse start continues forward so the snake never folds into its neck.
+    if (!opposite(next,direction)) direction = next;
+    state = 'running'; statusEl.textContent = 'Playing.'; planStep(); return;
+  }
+  if (state !== 'running') return;
+  const previous = queue.length ? queue[queue.length-1] : direction;
+  if (!opposite(next,previous) && !same(next,previous) && queue.length<2) queue.push(next);
+}
+function advance(ms) {
+  if (state === 'dying') { deathTime += ms; if (deathTime >= 270) state = 'dead'; return; }
+  if (state !== 'running') return;
+  let remaining = ms;
+  while (remaining > 0 && state === 'running') {
+    const needed = (1-progress)*1000/speed;
+    if (remaining < needed) { progress += remaining*speed/1000; break; }
+    remaining -= needed; finishStep();
+  }
+}
+function draw() {
+  const unit = canvas.width/SIZE;
+  ctx.fillStyle = '#000'; ctx.fillRect(0,0,canvas.width,canvas.height);
+  if (apple) { ctx.fillStyle = RED; ctx.fillRect(apple.x*unit+3,apple.y*unit+3,unit-6,unit-6); }
+  const red = state === 'dead' || (state === 'dying' && (deathTime<90 || deathTime>=180));
+  ctx.fillStyle = red ? RED : GREEN;
+  let head = snake[0];
+  const moving = state === 'running' && target;
+  // Every cube follows its predecessor along one grid edge; turns stay square.
+  snake.forEach((point,i) => {
+    const toward = i===0 ? target : snake[i-1];
+    const p = moving ? {x:point.x+(toward.x-point.x)*progress,y:point.y+(toward.y-point.y)*progress} : point;
+    if (i===0) head=p;
+    ctx.fillRect(p.x*unit,p.y*unit,unit,unit);
+  });
+  if (moving && apple && same(target,apple)) {
+    const tail = snake[snake.length-1]; ctx.fillRect(tail.x*unit,tail.y*unit,unit,unit);
+  }
+  if (!red) {
+    const forward = direction;
+    for (const offset of [-0.25,0.25]) {
+      const x=(head.x+0.5+offset)*unit;
+      const y=(head.y+(forward.y>0 ? 0.75 : 0.25))*unit;
+      ctx.fillStyle='#fff'; ctx.fillRect(x-unit*0.105,y-unit*0.105,unit*0.21,unit*0.21);
+      ctx.fillStyle='#000'; ctx.fillRect(x-unit*0.06+forward.x*unit*0.025,y-unit*0.06+forward.y*unit*0.025,unit*0.12,unit*0.12);
+    }
+  }
+}
+document.addEventListener('keydown',event => {
+  if (state==='dying' || state==='dead' || state==='won') { event.preventDefault(); if (!event.repeat) reset(); return; }
+  const key = event.key.length===1 ? event.key.toLowerCase() : event.key;
+  if (!directions[key]) return;
+  event.preventDefault(); if (!event.repeat) steer(directions[key]);
+});
+document.addEventListener('visibilitychange',()=> { lastTime=null; });
+window.addEventListener('blur',()=> { lastTime=null; });
+function frame(now) {
+  const elapsed=lastTime===null ? 0 : Math.min(now-lastTime,100); lastTime=now;
+  if (!document.hidden && document.hasFocus()) advance(elapsed);
+  draw(); requestAnimationFrame(frame);
+}
+reset(); requestAnimationFrame(frame);
+</script>
+</body>
+</html>
